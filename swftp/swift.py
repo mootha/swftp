@@ -120,6 +120,34 @@ def cb_json_decode(result):
     return resp, json.loads(body)
 
 
+class StringBodyProducer(object):
+    """
+    L{StringBodyProducer} produces bytes from an input string object
+    and writes them to a consumer.
+
+    @ivar data: String which will be written to a consumer.
+    """
+
+    def __init__(self, data):
+        self._data = data.encode('utf-8')
+        self.length = len(data)
+
+    def stopProducing(self):
+        pass
+
+    def startProducing(self, consumer):
+        consumer.write(self._data)
+        d = Deferred()
+        d.callback(None)
+        return d
+
+    def pauseProducing(self):
+        pass
+
+    def resumeProducing(self):
+        pass
+
+
 class SwiftConnection(object):
     """ A basic connection class to interface with OpenStack Swift.
 
@@ -205,13 +233,20 @@ class SwiftConnection(object):
         return self.authenticate()
 
     def after_authenticate(self, result):
-        response, _ = result
-        self.storage_url = response.headers['x-storage-url']
-        self.auth_token = response.headers['x-auth-token']
+        response, body = result
+        body = json.loads(body)
+        self.storage_url = None
+        for item in body["token"]["catalog"]:
+            if item["type"] == "object-store":
+                for endpoint in item["endpoints"]:
+                    if endpoint["interface"] == "public":
+                        self.storage_url = endpoint["url"].encode("utf-8")
+                        break
+        self.auth_token = response.headers['x-subject-token']
         return result
 
     def authenticate(self):
-        """ Authenticate against Swift (using v1 auth)
+        """ Authenticate against Swift (using v3 auth)
 
         :returns t.w.c.Response:
 
@@ -220,13 +255,46 @@ class SwiftConnection(object):
             'User-Agent': [self.user_agent],
             'X-Auth-User': [self.username],
             'X-Auth-Key': [self.api_key],
+            'Content-Type': ['application/json'],
         }
+        try:
+            project_name, user_name = self.username.split(':')
+        except ValueError:
+            # TODO: error handling
+            return None
 
         if self.extra_headers:
             for k, v in self.extra_headers.iteritems():
                 h[k] = [v]
 
-        d = self.agent.request('GET', self.auth_url, Headers(h))
+        body = {
+            "auth": {
+                "identity": {
+                    "methods": [
+                        "password"
+                    ],
+                    "password": {
+                        "user": {
+                            "domain": {
+                                "name": "Default",
+                            },
+                            "name": user_name,
+                            "password": self.api_key
+                        }
+                    }
+                },
+                "scope": {
+                    "project": {
+                        "domain": {
+                            "name": "Default",
+                        },
+                        "name": project_name,
+                    }
+                }
+            }
+        }
+
+        d = self.agent.request('POST', self.auth_url, Headers(h), bodyProducer=StringBodyProducer(json.dumps(body)))
         d.addCallback(cb_recv_resp, load_body=True)
         d.addCallback(self.after_authenticate)
         return d
