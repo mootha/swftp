@@ -258,7 +258,7 @@ class SwiftConnection(object):
             'Content-Type': ['application/json'],
         }
         try:
-            project_name, user_name = self.username.split(':')
+            project_name, user_name = self.username.split('.')
         except ValueError:
             # TODO: error handling
             return None
